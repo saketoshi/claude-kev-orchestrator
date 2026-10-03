@@ -197,6 +197,7 @@ Each `[kev]` orchestration turn gets a run ID. At turn completion (and as a fall
   run.json
   events.jsonl
   decisions.jsonl
+  outcomes.jsonl
   report.md
   feedback.json
 ```
@@ -229,12 +230,19 @@ The report currently captures:
 - spawned agent ID when available;
 - parent `Edit/Write/NotebookEdit` violations;
 - Agent tool start/completion;
+- worker Edit/Write/NotebookEdit counts;
+- recognized worker test commands and pass/fail;
+- non-test worker tool failures;
 - whether delegated execution succeeded at the orchestration boundary;
+- retry lineage inferred from repeated Work Package descriptions;
+- inferred Haiku -> Sonnet -> Opus escalation;
 - final phase and run timing.
 
 `report.md` is the human-readable review artifact.
 
-`run.json`, `events.jsonl`, and `decisions.jsonl` are intended for later analysis and Kev policy training/evaluation.
+`run.json`, `events.jsonl`, `decisions.jsonl`, and `outcomes.jsonl` are intended for later analysis and Kev policy training/evaluation.
+
+A Work Package ID is carried from `agent.spawn` to the spawned `agentId`, then used to attribute worker edits, tests and failures back to that package. Retries across newly spawned agents are grouped heuristically by normalized Work Package description into a lineage. This is useful evidence, but is explicitly an inference until a later version introduces parent-issued stable lineage IDs.
 
 ### Human feedback
 
@@ -308,6 +316,7 @@ hooks/policy.ts              conservative fallback model policy
 hooks/prompt.ts              [kev] opt-in + parent execution contract
 examples/mock-kev-server.mjs mock decision service
 docs/design-v0.3.md          architecture and roadmap
+docs/router-research-v0.1.md routing/evaluation research
 ```
 
 ## Current safety/flexibility boundary
@@ -344,11 +353,13 @@ Clear deterministic rules remain in the state machine; ambiguous decisions are w
 The next implementation steps are:
 
 1. wire `shouldSplit` back into parent decomposition;
-2. enter an explicit verification phase from test/tool outcomes;
-3. add outcome-aware Haiku -> Sonnet -> Opus escalation;
-4. record execution-contract violations and routing outcomes;
-5. compare all-Sonnet vs routing vs routing+state-enforcement;
+2. enter an explicit verification phase from observed tests/tool outcomes;
+3. use the newly captured outcome data for outcome-aware routing/escalation;
+4. add token/cost capture when Claude Code exposes stable accounting fields;
+5. build a controlled Haiku/Sonnet/Opus evaluation matrix using fixed Work Packages;
 6. later add a shared work graph for parallel agents.
+
+See [docs/router-research-v0.1.md](docs/router-research-v0.1.md) for analysis of HarnessRouter, Autohand Routes, and vLLM Semantic Router.
 
 Key metrics:
 
