@@ -47,12 +47,18 @@ export interface DecisionRecord {
   decision: ModelDecision
   source: "kev" | "fallback"
   agentId?: string
+  lineageId?: string
+  attempt?: number
+  escalatedFrom?: ModelAlias
 }
 
 export interface WorkPackageOutcome {
   workPackageId: string
+  lineageId: string
+  attempt: number
   agentId?: string
   model: ModelAlias
+  escalatedFrom?: ModelAlias
   startedAt: number
   finishedAt?: number
   editCalls: number
@@ -101,6 +107,7 @@ export interface RunObservation {
   events: RunEvent[]
   workPackageOutcomes: Record<string, WorkPackageOutcome>
   agentToWorkPackage: Record<string, string>
+  lineageAttempts: Record<string, string[]>
 }
 
 export interface SessionState {
