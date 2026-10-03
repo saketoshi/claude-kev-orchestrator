@@ -22,20 +22,42 @@ function markdown(run: RunObservation): string {
   const decisions = run.decisions
   const models = countBy(decisions.map((record) => record.decision.model))
   const violations = run.events.filter((event) => event.type === "parent_edit_denied")
-  const agentCompletions = run.events.filter((event) => event.type === "agent_tool_completed")
-  const failedAgentCalls = agentCompletions.filter((event) => event.outcome === "failed")
+  const outcomes = Object.values(run.workPackageOutcomes)
+  const tested = outcomes.filter((outcome) => outcome.testRuns > 0)
+  const firstPassLike = tested.filter(
+    (outcome) => outcome.testPasses > 0 && outcome.testFailures === 0,
+  )
+  const failed = outcomes.filter((outcome) => outcome.finalOutcome === "failed")
+  const partial = outcomes.filter((outcome) => outcome.finalOutcome === "partial")
 
   const decisionRows =
     decisions.length === 0
       ? "_No work packages were routed._"
       : [
-          "| Work package | Model | Confidence | Source | Split? | Reason |",
-          "| --- | --- | ---: | --- | --- | --- |",
+          "| Work package | Model | Confidence | Source | Split? | Outcome | Tests | Edits | Reason |",
+          "| --- | --- | ---: | --- | --- | --- | --- | ---: | --- |",
           ...decisions.map((record) => {
             const reason = (record.decision.reason ?? "").replaceAll("|", "\\|")
-            return `| ${record.workPackage.description.replaceAll("|", "\\|")} | ${record.decision.model} | ${Math.round(record.decision.confidence * 100)}% | ${record.source} | ${record.decision.shouldSplit ? "yes" : "no"} | ${reason} |`
+            const outcome = run.workPackageOutcomes[record.workPackage.id]
+            const tests = outcome
+              ? `${outcome.testPasses} pass / ${outcome.testFailures} fail`
+              : "n/a"
+            return `| ${record.workPackage.description.replaceAll("|", "\\|")} | ${record.decision.model} | ${Math.round(record.decision.confidence * 100)}% | ${record.source} | ${record.decision.shouldSplit ? "yes" : "no"} | ${outcome?.finalOutcome ?? "unknown"} | ${tests} | ${outcome?.editCalls ?? 0} | ${reason} |`
           }),
         ].join("\n")
+
+  const outcomeRows =
+    outcomes.length === 0
+      ? "_No worker outcomes were observed._"
+      : outcomes
+          .map((outcome) => {
+            const duration =
+              outcome.finishedAt === undefined
+                ? "open"
+                : `${outcome.finishedAt - outcome.startedAt} ms`
+            return `- \`${outcome.workPackageId}\` model=${outcome.model}, outcome=${outcome.finalOutcome}, edits=${outcome.editCalls}, tests=${outcome.testRuns} (${outcome.testPasses} pass / ${outcome.testFailures} fail), otherToolFailures=${outcome.otherToolFailures}, duration=${duration}`
+          })
+          .join("\n")
 
   return `# Kev Orchestration Run
 
@@ -47,15 +69,23 @@ function markdown(run: RunObservation): string {
 - Final phase: \`${run.finalPhase ?? run.phase}\`
 - Delegated packages: ${run.delegatedPackages}
 - Parent execution-contract violations: ${violations.length}
-- Failed Agent calls: ${failedAgentCalls.length}
+- Worker outcomes: ${outcomes.length}
+- Failed worker outcomes: ${failed.length}
+- Partial worker outcomes: ${partial.length}
+- Work packages with observed tests: ${tested.length}
+- Test-clean packages: ${firstPassLike.length}
 
 ### Model routing
 
 ${Object.keys(models).length === 0 ? "- none" : Object.entries(models).map(([model, count]) => `- ${model}: ${count}`).join("\n")}
 
-## Routing decisions
+## Routing decisions and observed outcomes
 
 ${decisionRows}
+
+## Worker execution
+
+${outcomeRows}
 
 ## Execution-contract violations
 
@@ -65,11 +95,12 @@ ${violations.length === 0 ? "_None._" : violations.map((event) => `- ${new Date(
 
 Review this run and answer:
 
-1. Was each selected model appropriate for the work package?
-2. Which packages should have been split further?
-3. Which packages were over-routed to a stronger model?
-4. Did runtime enforcement prevent useful work or correctly stop premature parent implementation?
-5. What execution-policy rule should change before the next run?
+1. Was each selected model appropriate for the observed outcome?
+2. Did a Haiku/Sonnet package need retries, failed tests, or stronger-model follow-up?
+3. Which packages should have been split further?
+4. Which packages were over-routed to a stronger model?
+5. Did runtime enforcement prevent useful work or correctly stop premature parent implementation?
+6. What execution-policy rule should change before the next run?
 
 Human feedback can be recorded in \`feedback.json\` beside this report.
 `
@@ -84,6 +115,8 @@ export function createRun(id: string, prompt: string, at = Date.now()): RunObser
     delegatedPackages: 0,
     decisions: [],
     events: [],
+    workPackageOutcomes: {},
+    agentToWorkPackage: {},
   }
 }
 
@@ -116,10 +149,13 @@ export async function writeRunReport(
 
   await mkdir(dir, { recursive: true })
 
+  const outcomes = Object.values(run.workPackageOutcomes)
+
   await Promise.all([
     writeFile(path.join(dir, "run.json"), JSON.stringify(run, null, 2) + "\n", "utf8"),
     writeFile(path.join(dir, "events.jsonl"), jsonl(run.events), "utf8"),
     writeFile(path.join(dir, "decisions.jsonl"), jsonl(run.decisions), "utf8"),
+    writeFile(path.join(dir, "outcomes.jsonl"), jsonl(outcomes), "utf8"),
     writeFile(path.join(dir, "report.md"), markdown(run), "utf8"),
     writeFile(
       path.join(dir, "feedback.json"),
