@@ -1,4 +1,4 @@
-# claude-kev-orchestrator Design v0.3
+# claude-kev-orchestrator Design v0.4
 
 ## 1. Goal
 
@@ -336,18 +336,21 @@ Intercept `agent.spawn` and choose the worker model.
 Enforce parent architect/delegation behavior before implementation. **Current.**
 
 ### v0.3 — Observability and evaluation reports
-Persist run decisions, execution events, violations, and human feedback artifacts for measurable policy improvement. **Current.**
+Persist run decisions, execution events, violations, and human feedback artifacts for measurable policy improvement.
 
-### v0.4 — Split feedback
+### v0.4 — Interactive control plane
+Add a Mods Pane, one-shot human model override, and optional Codex external review. **Current.**
+
+### v0.5 — Split feedback
 Use `shouldSplit` to return oversized packages to the parent for further decomposition.
 
-### v0.5 — Outcome-aware escalation
+### v0.6 — Outcome-aware escalation
 Use test/tool outcomes to retry, split, or escalate Haiku -> Sonnet -> Opus.
 
-### v0.6 — Shared work graph
+### v0.7 — Shared work graph
 Coordinate parallel workers through shared facts, ownership, dependencies, and checkpoint state.
 
-### v0.7 — Adaptive execution policy
+### v0.8 — Adaptive execution policy
 Let Kev learn actor/action/model decisions from package features and observed outcomes.
 
 
@@ -364,6 +367,7 @@ Default output:
   decisions.jsonl
   report.md
   outcomes.jsonl
+  reviews.jsonl
   feedback.json
 ```
 
@@ -460,3 +464,60 @@ hard eligibility gates
 ```
 
 HarnessRouter's public repository is primarily a unified harness execution layer, but its benchmark methodology is useful: keep task/input/contracts fixed, repeat configurations, retain raw observations, and validate quality with explicit criteria. Autohand Routes and vLLM Semantic Router are more directly relevant to model-selection mechanics such as capability gates, decision traces, eval gates, and learned selectors.
+
+
+## 18. Interactive control plane
+
+v0.4 adds a Claude Mods Pane as the runtime control surface.
+
+The pane is deliberately a projection of Core State rather than a separate source of truth.
+
+It exposes:
+
+- current execution phase;
+- current run;
+- recent Work Packages;
+- recommended/selected model;
+- confidence;
+- outcome/test state;
+- violation count;
+- Codex review status.
+
+The `/kev` command toggles the pane. A `[kev]` task attempts to open it automatically on a supported surface.
+
+### Human override
+
+A person can set the next worker to:
+
+- Auto;
+- Haiku;
+- Sonnet;
+- Opus.
+
+The override is consumed by exactly one subsequent `agent.spawn` and then resets to Auto.
+
+When a human override exists, the original Kev/fallback result remains in `recommendedDecision`, while the executed choice is stored in `decision` with `source=human_override`.
+
+This provides direct preference/correction data without destroying the router's original prediction.
+
+## 19. Optional external reviewer
+
+v0.4 adds an optional bridge to the official Codex CLI review command:
+
+```text
+codex exec --ephemeral --color never review --uncommitted
+```
+
+The bridge can be triggered:
+
+- manually through `/kev-review`;
+- manually from the Pane;
+- automatically at run completion only when `KEV_CODEX_AUTO_REVIEW=1`.
+
+Automatic review is disabled by default.
+
+The reviewer is intentionally outside the critical execution path. Missing CLI, authentication failure, timeout, or non-zero exit is captured as a failed review record but does not block Claude/Kev execution.
+
+Review records are persisted to `reviews.jsonl`, `run.json`, and the human-readable report.
+
+This is the first cross-vendor extension point. The orchestration core remains Claude-oriented today, while review can be delegated to an external OpenAI/Codex runtime.

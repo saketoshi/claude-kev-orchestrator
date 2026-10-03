@@ -4,6 +4,8 @@
 
 Identify routing ideas worth borrowing for `claude-kev-orchestrator`.
 
+This document is a comparison/research memo over public repositories and public documentation. Repository names and URLs are cited for architectural comparison. No third-party source code is incorporated by this memo; any future code reuse requires a separate license and attribution review.
+
 The target here is not generic request routing. The target is a coding execution policy that decides:
 
 - whether work should stay with the parent or be delegated;
@@ -245,3 +247,32 @@ For actual decision-policy mechanics, Autohand Routes and vLLM Semantic Router p
 - learned selection only after enough outcome data exists.
 
 The current Kev architecture is compatible with this direction because it is already recording prediction and runtime outcome separately.
+
+
+## 7. Pi 1.0 and Pi ecosystem
+
+Pi is relevant mainly as an architectural comparison for a programmable agent harness/runtime.
+
+Similarities to Claude Mods + Kev include:
+
+- lifecycle interception;
+- tool-call interception/modification;
+- runtime state;
+- model switching;
+- extension-driven UI/control;
+- multi-provider ambitions in the broader Pi ecosystem.
+
+Related Pi router extensions also explore model selection by task/context/phase.
+
+### Current Kev conclusion
+
+No Pi implementation is incorporated at this stage.
+
+The comparison reinforces two decisions already present in Kev:
+
+1. keep orchestration state/policy independent from a specific UI surface;
+2. keep model routing as only one part of the execution controller.
+
+Kev remains differentiated by focusing on Closed Work Package transformation, execution-discipline enforcement, outcome correlation, retry/escalation evidence, and human/runtime control around the coding process.
+
+Pi should be revisited if/when a provider-neutral execution runtime becomes more important than Claude Code-specific Mods integration.

@@ -31,6 +31,7 @@ function markdown(run: RunObservation): string {
   const partial = outcomes.filter((outcome) => outcome.finalOutcome === "partial")
   const retries = outcomes.filter((outcome) => outcome.attempt > 1)
   const escalations = outcomes.filter((outcome) => outcome.escalatedFrom !== undefined)
+  const reviews = run.reviews
 
   const decisionRows =
     decisions.length === 0
@@ -44,7 +45,12 @@ function markdown(run: RunObservation): string {
             const tests = outcome
               ? `${outcome.testPasses} pass / ${outcome.testFailures} fail`
               : "n/a"
-            return `| ${record.workPackage.description.replaceAll("|", "\\|")} | ${record.decision.model} | ${Math.round(record.decision.confidence * 100)}% | ${record.source} | ${record.decision.shouldSplit ? "yes" : "no"} | ${outcome?.finalOutcome ?? "unknown"} | ${tests} | ${outcome?.editCalls ?? 0} | ${reason} |`
+            const model =
+              record.recommendedDecision &&
+              record.recommendedDecision.model !== record.decision.model
+                ? `${record.recommendedDecision.model}→${record.decision.model}`
+                : record.decision.model
+            return `| ${record.workPackage.description.replaceAll("|", "\\|")} | ${model} | ${Math.round(record.decision.confidence * 100)}% | ${record.source} | ${record.decision.shouldSplit ? "yes" : "no"} | ${outcome?.finalOutcome ?? "unknown"} | ${tests} | ${outcome?.editCalls ?? 0} | ${reason} |`
           }),
         ].join("\n")
 
@@ -78,6 +84,7 @@ function markdown(run: RunObservation): string {
 - Inferred model escalations: ${escalations.length}
 - Work packages with observed tests: ${tested.length}
 - Test-clean packages: ${firstPassLike.length}
+- External reviews: ${reviews.length}
 
 ### Model routing
 
@@ -94,6 +101,10 @@ ${outcomeRows}
 ## Execution-contract violations
 
 ${violations.length === 0 ? "_None._" : violations.map((event) => `- ${new Date(event.at).toISOString()} — ${event.tool ?? "unknown tool"} during \`${event.phase}\``).join("\n")}
+
+## External reviews
+
+${reviews.length === 0 ? "_None._" : reviews.map((review) => `### Codex review — ${review.trigger} — ${review.succeeded ? "succeeded" : "failed"}\n\n${review.output || review.error || "_No output._"}`).join("\n\n")}
 
 ## Evaluation prompts
 
@@ -122,6 +133,7 @@ export function createRun(id: string, prompt: string, at = Date.now()): RunObser
     workPackageOutcomes: {},
     agentToWorkPackage: {},
     lineageAttempts: {},
+    reviews: [],
   }
 }
 
@@ -161,23 +173,33 @@ export async function writeRunReport(
     writeFile(path.join(dir, "events.jsonl"), jsonl(run.events), "utf8"),
     writeFile(path.join(dir, "decisions.jsonl"), jsonl(run.decisions), "utf8"),
     writeFile(path.join(dir, "outcomes.jsonl"), jsonl(outcomes), "utf8"),
+    writeFile(path.join(dir, "reviews.jsonl"), jsonl(run.reviews), "utf8"),
     writeFile(path.join(dir, "report.md"), markdown(run), "utf8"),
-    writeFile(
-      path.join(dir, "feedback.json"),
-      JSON.stringify(
-        {
-          runId: run.id,
-          overall: null,
-          problematicWorkPackages: [],
-          comments: "",
-          suggestedPolicyChanges: [],
-        },
-        null,
-        2,
-      ) + "\n",
-      "utf8",
-    ),
   ])
+
+  // Never overwrite human feedback when the report is refreshed after a
+  // review or late runtime event.
+  await writeFile(
+    path.join(dir, "feedback.json"),
+    JSON.stringify(
+      {
+        runId: run.id,
+        overall: null,
+        problematicWorkPackages: [],
+        comments: "",
+        suggestedPolicyChanges: [],
+      },
+      null,
+      2,
+    ) + "\n",
+    { encoding: "utf8", flag: "wx" },
+  ).catch((error: unknown) => {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined
+    if (code !== "EEXIST") throw error
+  })
 
   return dir
 }
