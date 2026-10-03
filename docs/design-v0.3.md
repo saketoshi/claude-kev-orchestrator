@@ -363,6 +363,7 @@ Default output:
   events.jsonl
   decisions.jsonl
   report.md
+  outcomes.jsonl
   feedback.json
 ```
 
@@ -411,3 +412,51 @@ The output root can be overridden by `KEV_REPORT_DIR`.
 - suggested policy changes.
 
 Future Kev training/evaluation should join prediction, runtime outcome, and human feedback by run/work-package identity rather than learning from model choice alone.
+
+
+## 16. Work Package outcome correlation
+
+The observability layer now correlates runtime evidence back to the Work Package that caused it.
+
+```text
+Work Package ID
+  -> agent.spawn
+  -> agentId
+  -> worker tool calls
+  -> edits
+  -> recognized test commands
+  -> tool/test failures
+  -> Agent boundary completion
+  -> final observed outcome
+```
+
+`outcomes.jsonl` stores one record per Work Package with:
+
+- selected model;
+- agent ID;
+- edit count;
+- test runs/pass/fail;
+- other tool failures;
+- final observed outcome;
+- evidence timestamps.
+
+Retries are also grouped into a `lineageId` derived from the normalized Work Package description. Later attempts receive an incrementing `attempt` and a stronger selected model is marked as `escalatedFrom`.
+
+This retry/escalation grouping is intentionally labeled heuristic. A later protocol should let the parent assign a stable lineage ID when it explicitly retries or re-splits a package.
+
+## 17. Routing research implication
+
+See `docs/router-research-v0.1.md`.
+
+The current direction is to avoid training Kev on subjective model labels. Instead, collect controlled outcome data and learn a model-specific probability of successful completion.
+
+The target policy is:
+
+```text
+hard eligibility gates
+  -> predict success probability per model
+  -> choose cheapest/fastest model above required quality threshold
+  -> split instead of escalating where decomposition has higher expected value
+```
+
+HarnessRouter's public repository is primarily a unified harness execution layer, but its benchmark methodology is useful: keep task/input/contracts fixed, repeat configurations, retain raw observations, and validate quality with explicit criteria. Autohand Routes and vLLM Semantic Router are more directly relevant to model-selection mechanics such as capability gates, decision traces, eval gates, and learned selectors.
