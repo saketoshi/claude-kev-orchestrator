@@ -1,0 +1,13 @@
+{
+  "name": "claude-kev-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kev-powered adaptive model orchestration for Claude Code",
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}
