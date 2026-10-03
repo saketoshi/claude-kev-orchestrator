@@ -23,7 +23,7 @@ When a prompt starts with `[kev]`:
 
 So this is intentionally more than a model router: it also protects the execution strategy from being forgotten by the parent model.
 
-See [docs/design-v0.1.md](docs/design-v0.1.md) for the detailed design.
+See [docs/design-v0.2.md](docs/design-v0.2.md) for the detailed design.
 
 ## Runtime flow
 
@@ -213,7 +213,7 @@ hooks/kev.ts                 Kev HTTP client
 hooks/policy.ts              conservative fallback model policy
 hooks/prompt.ts              [kev] opt-in + parent execution contract
 examples/mock-kev-server.mjs mock decision service
-docs/design-v0.1.md          architecture and roadmap
+docs/design-v0.2.md          architecture and roadmap
 ```
 
 ## Current safety/flexibility boundary
