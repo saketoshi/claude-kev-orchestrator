@@ -367,6 +367,7 @@ Default output:
   decisions.jsonl
   report.md
   outcomes.jsonl
+  reviews.jsonl
   feedback.json
 ```
 
