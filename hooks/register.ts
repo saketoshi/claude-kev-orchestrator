@@ -97,6 +97,10 @@ async function executeCodexReview(
   state: SessionState,
   trigger: "manual" | "auto",
 ): Promise<string> {
+  if (!state.currentRun) {
+    return "No Kev run is available for review. Start a [kev] task first."
+  }
+
   const review = await runCodexReview($, state.currentRun, trigger)
   const written = await persistRun($, state)
 
