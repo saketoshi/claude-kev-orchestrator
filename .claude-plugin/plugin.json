@@ -1,7 +1,7 @@
 {
   "name": "claude-kev-orchestrator",
-  "version": "0.1.0",
-  "description": "Kev-powered adaptive model orchestration for Claude Code. Intercepts subagent spawning and selects Haiku, Sonnet, Opus, or inherit based on work-package fit.",
+  "version": "0.2.0",
+  "description": "Kev-powered adaptive execution orchestration for Claude Code. Enforces parent delegation and selects Haiku, Sonnet, Opus, or inherit for spawned work packages.",
   "author": {
     "name": "saketoshi"
   }
