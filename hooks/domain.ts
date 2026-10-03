@@ -46,6 +46,42 @@ export interface DecisionRecord {
   workPackage: WorkPackage
   decision: ModelDecision
   source: "kev" | "fallback"
+  agentId?: string
+}
+
+export type RunEventType =
+  | "run_started"
+  | "phase_changed"
+  | "parent_edit_denied"
+  | "agent_tool_started"
+  | "agent_spawned"
+  | "agent_tool_completed"
+  | "run_completed"
+  | "report_written"
+
+export interface RunEvent {
+  at: number
+  type: RunEventType
+  phase: ExecutionPhase
+  actor?: ExecutionActor
+  tool?: string
+  agentId?: string
+  workPackageId?: string
+  model?: ModelAlias
+  outcome?: "succeeded" | "failed" | "denied"
+  detail?: string
+}
+
+export interface RunObservation {
+  id: string
+  prompt: string
+  startedAt: number
+  finishedAt?: number
+  phase: ExecutionPhase
+  finalPhase?: ExecutionPhase
+  delegatedPackages: number
+  decisions: DecisionRecord[]
+  events: RunEvent[]
 }
 
 export interface SessionState {
@@ -53,4 +89,5 @@ export interface SessionState {
   phase: ExecutionPhase
   delegatedPackages: number
   decisions: DecisionRecord[]
+  currentRun?: RunObservation
 }
