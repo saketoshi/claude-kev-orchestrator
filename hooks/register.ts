@@ -236,12 +236,16 @@ export function register(on: On): void {
 
     state.decisions.push(record)
     recordDecision(state.currentRun, record)
-    startWorkPackageOutcome(
+    const lineage = startWorkPackageOutcome(
       state.currentRun,
       workPackage.id,
+      workPackage.description,
       decision.model,
       record.at,
     )
+    record.lineageId = lineage.lineageId
+    record.attempt = lineage.attempt
+    record.escalatedFrom = lineage.escalatedFrom
     workerSpawned(state)
     syncRun(state.currentRun, state)
 
