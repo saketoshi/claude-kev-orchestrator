@@ -171,13 +171,19 @@ export function register(on: On): void {
     }
 
     try {
-      await $.ui.open({
+      const opened = await $.ui.open({
         id: PANE_ID,
         title: PANE_TITLE,
         holdToasts: true,
       })
-      isPaneOpen = true
-      invalidate($)
+      const isPlaced =
+        typeof opened !== "object" ||
+        opened === null ||
+        !("isPlaced" in opened) ||
+        (opened as { isPlaced?: unknown }).isPlaced !== false
+
+      isPaneOpen = isPlaced
+      if (isPlaced) invalidate($)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       $.ui.log(`kev: pane unavailable on this surface: ${message}`, {
@@ -192,20 +198,25 @@ export function register(on: On): void {
     state.nextModelOverride = undefined
     resetOrchestration(state)
 
-    try {
-      await $.command.register({
+    for (const command of [
+      {
         name: "kev",
         description: "Toggle the Kev Orchestrator pane",
-      })
-      await $.command.register({
+      },
+      {
         name: "kev-review",
         description: "Run an optional Codex review of uncommitted changes",
-      })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      $.ui.log(`kev: command registration skipped: ${message}`, {
-        to: "debug",
-      })
+      },
+    ] as const) {
+      try {
+        await $.command.register(command)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        $.ui.log(
+          `kev: /${command.name} registration skipped: ${message}`,
+          { to: "debug" },
+        )
+      }
     }
 
     $.ui.log("claude-kev-orchestrator: active", { to: "debug" })
