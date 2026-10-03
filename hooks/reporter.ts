@@ -45,7 +45,12 @@ function markdown(run: RunObservation): string {
             const tests = outcome
               ? `${outcome.testPasses} pass / ${outcome.testFailures} fail`
               : "n/a"
-            return `| ${record.workPackage.description.replaceAll("|", "\\|")} | ${record.decision.model} | ${Math.round(record.decision.confidence * 100)}% | ${record.source} | ${record.decision.shouldSplit ? "yes" : "no"} | ${outcome?.finalOutcome ?? "unknown"} | ${tests} | ${outcome?.editCalls ?? 0} | ${reason} |`
+            const model =
+              record.recommendedDecision &&
+              record.recommendedDecision.model !== record.decision.model
+                ? `${record.recommendedDecision.model}→${record.decision.model}`
+                : record.decision.model
+            return `| ${record.workPackage.description.replaceAll("|", "\\|")} | ${model} | ${Math.round(record.decision.confidence * 100)}% | ${record.source} | ${record.decision.shouldSplit ? "yes" : "no"} | ${outcome?.finalOutcome ?? "unknown"} | ${tests} | ${outcome?.editCalls ?? 0} | ${reason} |`
           }),
         ].join("\n")
 
