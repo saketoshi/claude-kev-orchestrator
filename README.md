@@ -131,7 +131,14 @@ http://127.0.0.1:8787/decide
 
 Use this first to verify the Claude Code interception flow before connecting the real Kev implementation.
 
-### 4. Start Claude Code with the Plugin
+### 4. Install dev dependencies and type-check
+
+```bash
+npm install
+npm run check
+```
+
+### 5. Start Claude Code with the Plugin
 
 From this repository:
 
@@ -147,7 +154,7 @@ hooks/hooks.json
 hooks/register.ts
 ```
 
-### 5. Enable orchestration for a task
+### 6. Enable orchestration for a task
 
 Prefix the task with `[kev]`:
 
@@ -159,7 +166,7 @@ The marker is removed before Claude sees the final user prompt. The Mod adds the
 
 A prompt without `[kev]` runs normally and disables this orchestration state for that turn.
 
-### 6. What to observe
+### 7. What to observe
 
 Run Claude Code with debug output available and verify:
 
@@ -169,6 +176,82 @@ Run Claude Code with debug output available and verify:
 - each `agent.spawn` gets a Kev model decision;
 - worker edits are not blocked;
 - parent edits are allowed after delegated work returns.
+
+## Run reports and feedback
+
+Each `[kev]` orchestration turn gets a run ID. At turn completion (and as a fallback on session end), the Plugin writes:
+
+```text
+.kev/runs/<run-id>/
+  run.json
+  events.jsonl
+  decisions.jsonl
+  report.md
+  feedback.json
+```
+
+The default report root is `.kev/runs` under the Claude Code working directory.
+
+Override it with:
+
+```bash
+export KEV_REPORT_DIR=/path/to/kev-reports
+```
+
+PowerShell:
+
+```powershell
+$env:KEV_REPORT_DIR = "C:\path\to\kev-reports"
+```
+
+### What is recorded
+
+The report currently captures:
+
+- the original `[kev]` task;
+- execution phase;
+- each Work Package;
+- selected model;
+- Kev confidence/reason;
+- whether `shouldSplit` was returned;
+- Kev vs fallback decision source;
+- spawned agent ID when available;
+- parent `Edit/Write/NotebookEdit` violations;
+- Agent tool start/completion;
+- whether delegated execution succeeded at the orchestration boundary;
+- final phase and run timing.
+
+`report.md` is the human-readable review artifact.
+
+`run.json`, `events.jsonl`, and `decisions.jsonl` are intended for later analysis and Kev policy training/evaluation.
+
+### Human feedback
+
+`feedback.json` is created as:
+
+```json
+{
+  "runId": "<run-id>",
+  "overall": null,
+  "problematicWorkPackages": [],
+  "comments": "",
+  "suggestedPolicyChanges": []
+}
+```
+
+After reviewing `report.md`, edit this file to capture where routing or orchestration felt wrong.
+
+The important learning unit is:
+
+```text
+Kev prediction
++ runtime execution events
++ actual outcome
++ human feedback
+```
+
+This is intentionally collected before adding more adaptive policy so future changes can be evaluated against real run history.
+
 
 ## Kev HTTP contract
 
