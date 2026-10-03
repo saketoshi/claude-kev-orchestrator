@@ -10,13 +10,14 @@ import type {
   WorkPackage,
 } from "./domain"
 import { askKev } from "./kev"
-import { fallbackDecision } from "./policy"
 import {
   bindAgent,
   completeWorkPackage,
   observeWorkerTool,
   startWorkPackageOutcome,
 } from "./observer"
+import { PANE_ID, PANE_TITLE, paneView } from "./pane"
+import { fallbackDecision } from "./policy"
 import { isKevPrompt, rewriteKevPrompt } from "./prompt"
 import {
   createRun,
@@ -25,6 +26,7 @@ import {
   syncRun,
   writeRunReport,
 } from "./reporter"
+import { runCodexReview, shouldAutoReview } from "./reviewer"
 import {
   beginDelegation,
   delegationFinished,
@@ -65,13 +67,53 @@ function packageFromSpawn(e: {
 
 function runEvent(
   state: SessionState,
-  event: Omit<RunEvent, "at" | "phase"> & { at?: number; phase?: RunEvent["phase"] },
+  event: Omit<RunEvent, "at" | "phase"> & {
+    at?: number
+    phase?: RunEvent["phase"]
+  },
 ): void {
   recordEvent(state.currentRun, {
     at: event.at ?? Date.now(),
     phase: event.phase ?? state.phase,
     ...event,
   })
+}
+
+async function persistRun(
+  $: EngineInterface,
+  state: SessionState,
+): Promise<string | undefined> {
+  const run = state.currentRun
+  if (!run) return undefined
+
+  syncRun(run, state)
+  const cwd = await $.session.cwd()
+  const reportDir = await $.env.get("KEV_REPORT_DIR")
+  return writeRunReport(cwd, reportDir, run)
+}
+
+async function executeCodexReview(
+  $: EngineInterface,
+  state: SessionState,
+  trigger: "manual" | "auto",
+): Promise<string> {
+  const review = await runCodexReview($, state.currentRun, trigger)
+  const written = await persistRun($, state)
+
+  $.ui.invalidate("ui.render")
+
+  if (!review.succeeded) {
+    const detail = review.error || review.output || "unknown error"
+    $.ui.log(`kev: Codex review failed: ${detail}`, { to: "debug" })
+    return `Codex review failed: ${detail}`
+  }
+
+  $.ui.log(
+    `kev: Codex review completed${written ? `; report=${written}` : ""}`,
+    { to: "debug" },
+  )
+
+  return review.output || "Codex review completed with no textual output."
 }
 
 async function finalizeRun(
@@ -81,14 +123,20 @@ async function finalizeRun(
   const run = state.currentRun
   if (!run || run.finishedAt !== undefined) return
 
+  if (
+    (await shouldAutoReview($)) &&
+    !run.reviews.some((review) => review.trigger === "auto")
+  ) {
+    await executeCodexReview($, state, "auto")
+  }
+
   syncRun(run, state)
   run.finishedAt = Date.now()
   run.finalPhase = state.phase
   runEvent(state, { type: "run_completed" })
 
-  const cwd = await $.session.cwd()
-  const reportDir = await $.env.get("KEV_REPORT_DIR")
-  const written = await writeRunReport(cwd, reportDir, run)
+  const written = await persistRun($, state)
+  if (!written) return
 
   recordEvent(run, {
     at: Date.now(),
@@ -98,7 +146,7 @@ async function finalizeRun(
   })
 
   // Rewrite once so report_written is also persisted.
-  await writeRunReport(cwd, reportDir, run)
+  await persistRun($, state)
   $.ui.log(`kev: run report written to ${written}`, { to: "debug" })
 }
 
@@ -110,12 +158,112 @@ export function register(on: On): void {
     decisions: [],
   }
 
-  on("session.start", ($, e, next) => {
+  let isPaneOpen = false
+
+  const invalidate = ($: EngineInterface): void => {
+    $.ui.invalidate("ui.render")
+  }
+
+  const openPane = async ($: EngineInterface): Promise<void> => {
+    if (isPaneOpen) {
+      invalidate($)
+      return
+    }
+
+    try {
+      await $.ui.open({
+        id: PANE_ID,
+        title: PANE_TITLE,
+        holdToasts: true,
+      })
+      isPaneOpen = true
+      invalidate($)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      $.ui.log(`kev: pane unavailable on this surface: ${message}`, {
+        to: "debug",
+      })
+    }
+  }
+
+  on("session.start", async ($, e, next) => {
     state.decisions.length = 0
     state.currentRun = undefined
+    state.nextModelOverride = undefined
     resetOrchestration(state)
+
+    try {
+      await $.command.register({
+        name: "kev",
+        description: "Toggle the Kev Orchestrator pane",
+      })
+      await $.command.register({
+        name: "kev-review",
+        description: "Run an optional Codex review of uncommitted changes",
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      $.ui.log(`kev: command registration skipped: ${message}`, {
+        to: "debug",
+      })
+    }
+
     $.ui.log("claude-kev-orchestrator: active", { to: "debug" })
     return next(e)
+  })
+
+  on("command.run", { command: "kev" }, async ($) => {
+    if (isPaneOpen) {
+      await $.ui.close({ id: PANE_ID }).catch(() => undefined)
+      isPaneOpen = false
+      return { text: "Kev Orchestrator pane hidden." }
+    }
+
+    await openPane($)
+    return {
+      text: isPaneOpen
+        ? "Kev Orchestrator pane shown."
+        : "Kev Orchestrator pane is unavailable on this surface.",
+    }
+  })
+
+  on("command.run", { command: "kev-review" }, async ($) => {
+    const text = await executeCodexReview($, state, "manual")
+    return { text }
+  })
+
+  on("ui.close", { id: PANE_ID }, async ($, e, next) => {
+    const result = await next(e)
+    if (result.deny === undefined) isPaneOpen = false
+    return result
+  })
+
+  on("ui.render", { component: "Pane" }, async ($, e, next) => {
+    if (e.requestId !== PANE_ID) return next(e)
+
+    try {
+      const { Box, Text, Button } = await $.ui.resolve(e)
+
+      return paneView(
+        { Box, Text, Button },
+        state,
+        {
+          setNextModel: (model) => {
+            state.nextModelOverride = model
+            $.ui.log(
+              `kev: next worker override=${model ?? "auto"}`,
+              { to: "debug" },
+            )
+            invalidate($)
+          },
+          runCodexReview: () => {
+            void executeCodexReview($, state, "manual")
+          },
+        },
+      )
+    } catch {
+      return next(e)
+    }
   })
 
   on("prompt.submit", async ($, e, next) => {
@@ -123,12 +271,15 @@ export function register(on: On): void {
       await finalizeRun($, state)
       resetOrchestration(state)
       state.currentRun = undefined
+      state.nextModelOverride = undefined
+      invalidate($)
       return next(e)
     }
 
     await finalizeRun($, state)
     startOrchestration(state)
     state.decisions.length = 0
+    state.nextModelOverride = undefined
     state.currentRun = createRun(randomUUID(), e.text)
     runEvent(state, { type: "run_started" })
 
@@ -138,6 +289,9 @@ export function register(on: On): void {
       `kev: orchestration enabled; run=${state.currentRun.id}; parent starts in decompose phase`,
       { to: "debug" },
     )
+
+    void openPane($)
+    invalidate($)
 
     return rewritten === undefined ? next(e) : next({ ...e, text: rewritten })
   })
@@ -156,6 +310,7 @@ export function register(on: On): void {
         $.ui.log(`kev: denied parent ${e.tool} during ${state.phase}`, {
           to: "debug",
         })
+        invalidate($)
         return { deny }
       }
 
@@ -172,7 +327,12 @@ export function register(on: On): void {
     const beforeDecisionCount = state.currentRun?.decisions.length ?? 0
     beginDelegation(state)
     syncRun(state.currentRun, state)
-    runEvent(state, { type: "agent_tool_started", actor: "parent", tool: "Agent" })
+    runEvent(state, {
+      type: "agent_tool_started",
+      actor: "parent",
+      tool: "Agent",
+    })
+    invalidate($)
 
     const result = await next(e)
     const delegated = state.delegatedPackages > before
@@ -181,6 +341,7 @@ export function register(on: On): void {
 
     const delegatedRecords =
       state.currentRun?.decisions.slice(beforeDecisionCount) ?? []
+
     for (const record of delegatedRecords) {
       completeWorkPackage(
         state.currentRun,
@@ -208,6 +369,7 @@ export function register(on: On): void {
       `kev: Agent tool completed; phase=${state.phase}, delegated=${state.delegatedPackages}`,
       { to: "debug" },
     )
+    invalidate($)
 
     return result
   })
@@ -217,25 +379,42 @@ export function register(on: On): void {
     const endpoint = await $.env.get("KEV_ENDPOINT")
     const timeoutMs = parseTimeout(await $.env.get("KEV_TIMEOUT_MS"))
 
-    let decision: ModelDecision | undefined
-    let source: DecisionRecord["source"] = "fallback"
+    let recommended: ModelDecision | undefined
+    let recommendationSource: "kev" | "fallback" = "fallback"
 
     if (endpoint) {
-      decision = await askKev(endpoint, timeoutMs, workPackage)
-      if (decision) source = "kev"
+      recommended = await askKev(endpoint, timeoutMs, workPackage)
+      if (recommended) recommendationSource = "kev"
     }
 
-    decision ??= fallbackDecision(workPackage)
+    recommended ??= fallbackDecision(workPackage)
+
+    let decision = recommended
+    let source: DecisionRecord["source"] = recommendationSource
+
+    const humanOverride = state.nextModelOverride
+    if (humanOverride !== undefined) {
+      decision = {
+        ...recommended,
+        model: humanOverride,
+        reason: `Human override: ${recommended.model} -> ${humanOverride}. ${recommended.reason ?? ""}`.trim(),
+      }
+      source = "human_override"
+      state.nextModelOverride = undefined
+    }
 
     const record: DecisionRecord = {
       at: Date.now(),
       workPackage,
       decision,
+      recommendedDecision:
+        source === "human_override" ? recommended : undefined,
       source,
     }
 
     state.decisions.push(record)
     recordDecision(state.currentRun, record)
+
     const lineage = startWorkPackageOutcome(
       state.currentRun,
       workPackage.id,
@@ -246,8 +425,10 @@ export function register(on: On): void {
     record.lineageId = lineage.lineageId
     record.attempt = lineage.attempt
     record.escalatedFrom = lineage.escalatedFrom
+
     workerSpawned(state)
     syncRun(state.currentRun, state)
+    invalidate($)
 
     const result =
       decision.model === "inherit"
@@ -264,20 +445,23 @@ export function register(on: On): void {
       agentId,
       workPackageId: workPackage.id,
       model: decision.model,
-      detail: decision.reason,
+      detail:
+        source === "human_override"
+          ? `recommended=${recommended.model}; selected=${decision.model}`
+          : decision.reason,
     })
 
     const reason = decision.reason ? ` - ${decision.reason}` : ""
     $.ui.log(
       `kev: ${workPackage.description} -> ${decision.model} (${Math.round(
         decision.confidence * 100,
-      )}%)${reason}`,
+      )}%) [${source}]${reason}`,
       { to: "debug" },
     )
+    invalidate($)
 
     return result
   })
-
 
   // Observe worker-side tools after execution and bind them back to the
   // Work Package through agentId. This does not alter tool behavior.
@@ -316,6 +500,7 @@ export function register(on: On): void {
             ? command.slice(0, 300)
             : undefined,
       })
+      invalidate($)
     }
 
     return result
@@ -327,6 +512,7 @@ export function register(on: On): void {
       typeof (e as { agentId?: unknown }).agentId === "string"
 
     if (state.active && !isWorkerTurn) await finalizeRun($, state)
+    invalidate($)
     return next(e)
   })
 
