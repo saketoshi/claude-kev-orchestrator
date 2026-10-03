@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 
-import type { On } from "claude-code"
+import type { EngineInterface, On } from "claude-code"
 
 import type {
   DecisionRecord,
@@ -69,7 +69,7 @@ function runEvent(
 }
 
 async function finalizeRun(
-  $: Parameters<Parameters<On>[1]>[0],
+  $: EngineInterface,
   state: SessionState,
 ): Promise<void> {
   const run = state.currentRun
