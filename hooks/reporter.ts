@@ -29,6 +29,8 @@ function markdown(run: RunObservation): string {
   )
   const failed = outcomes.filter((outcome) => outcome.finalOutcome === "failed")
   const partial = outcomes.filter((outcome) => outcome.finalOutcome === "partial")
+  const retries = outcomes.filter((outcome) => outcome.attempt > 1)
+  const escalations = outcomes.filter((outcome) => outcome.escalatedFrom !== undefined)
 
   const decisionRows =
     decisions.length === 0
@@ -55,7 +57,7 @@ function markdown(run: RunObservation): string {
               outcome.finishedAt === undefined
                 ? "open"
                 : `${outcome.finishedAt - outcome.startedAt} ms`
-            return `- \`${outcome.workPackageId}\` model=${outcome.model}, outcome=${outcome.finalOutcome}, edits=${outcome.editCalls}, tests=${outcome.testRuns} (${outcome.testPasses} pass / ${outcome.testFailures} fail), otherToolFailures=${outcome.otherToolFailures}, duration=${duration}`
+            return `- \`${outcome.workPackageId}\` lineage=\`${outcome.lineageId}\`, attempt=${outcome.attempt}, model=${outcome.model}${outcome.escalatedFrom ? ` (escalated from ${outcome.escalatedFrom})` : ""}, outcome=${outcome.finalOutcome}, edits=${outcome.editCalls}, tests=${outcome.testRuns} (${outcome.testPasses} pass / ${outcome.testFailures} fail), otherToolFailures=${outcome.otherToolFailures}, duration=${duration}`
           })
           .join("\n")
 
@@ -72,6 +74,8 @@ function markdown(run: RunObservation): string {
 - Worker outcomes: ${outcomes.length}
 - Failed worker outcomes: ${failed.length}
 - Partial worker outcomes: ${partial.length}
+- Inferred retries: ${retries.length}
+- Inferred model escalations: ${escalations.length}
 - Work packages with observed tests: ${tested.length}
 - Test-clean packages: ${firstPassLike.length}
 
@@ -117,6 +121,7 @@ export function createRun(id: string, prompt: string, at = Date.now()): RunObser
     events: [],
     workPackageOutcomes: {},
     agentToWorkPackage: {},
+    lineageAttempts: {},
   }
 }
 
