@@ -1,0 +1,4 @@
+{
+  "description": "Kev-powered model selection and optional decomposition guidance for Claude Code subagents.",
+  "modules": ["./register.ts"]
+}
