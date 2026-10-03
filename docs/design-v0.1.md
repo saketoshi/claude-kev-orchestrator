@@ -1,83 +1,148 @@
-# claude-kev-orchestrator Design v0.1
+# claude-kev-orchestrator Design v0.2
 
 ## 1. Goal
 
-Use Claude Code Mods as a runtime interception layer and Kev (Qwen-backed decision engine) as a lightweight model-fit classifier.
+Use Claude Code Mods as a runtime execution orchestrator, with Kev (Qwen-backed) making lightweight adaptive decisions.
 
-The first target is not a generic multi-agent framework. It is a measurable coding optimization:
+The project is intentionally broader than a model router.
 
-1. A strong Claude model designs/decomposes work.
-2. Claude Code spawns subagents for concrete work packages.
-3. The mod intercepts `agent.spawn` before the model is resolved.
-4. Kev classifies the work package as Haiku-, Sonnet-, or Opus-suitable.
-5. The mod returns the selected Claude model alias.
-6. The result is recorded in shared session state for later evaluation/escalation.
+It addresses two failure modes:
+
+1. **model-fit failure** — expensive/strong models execute work that could be delegated to cheaper models;
+2. **execution-discipline failure** — the parent model is told to decompose/delegate work but forgets the instruction and starts implementing directly.
+
+The runtime therefore owns both:
+
+- **who should execute a work package**; and
+- **what the parent is allowed to do at the current execution phase**.
 
 ## 2. Why Mods
 
-Classic hooks can observe and react, but Mods can rewrite runtime events. Claude Code's `agent.spawn` event fires after the subagent task is decided and before its model is resolved, which is the exact decision point needed by this project.
+Skills and prompts can tell Claude how to behave, but Claude can still choose another action.
 
-The orchestration core is intentionally isolated from Claude Code APIs because Mods are early access and may change.
+MCP adds capabilities, but Claude must choose to call them.
 
-## 3. Scope
+Agent definitions define workers, but the parent can still skip delegation.
 
-### v0.1
+Mods operate at the Claude Code runtime boundary. Two events are especially useful:
 
-- Intercept `agent.spawn`.
-- Ask Kev which model should execute the work package.
-- Support `haiku | sonnet | opus | inherit`.
-- Fall back safely when Kev is unavailable.
-- Keep in-memory per-session decision state.
-- Optional prompt opt-in marker (`[kev]`) that adds decomposition guidance.
-- Never block a subagent because Kev failed.
+- `agent.spawn`: fires after a subagent task is decided and before its model is resolved;
+- `tool.call`: fires immediately before a tool executes and can return `{ deny: reason }`.
 
-### Not v0.1
+This lets the orchestrator enforce an execution contract rather than merely suggest one.
 
-- Starting new agents independently of Claude.
-- Automatic recursive task decomposition.
-- Shared state across multiple Claude Code processes.
-- Cost/token telemetry.
-- Automatic retry/escalation after failed implementation.
-- Cross-vendor worker models.
+## 3. Current execution model
 
-These are later phases.
-
-## 4. Architecture
+An opt-in `[kev]` user prompt enables orchestration for that turn.
 
 ```text
-User task
-   |
-   v
-Claude main agent
-   |
-   | Agent tool: prompt + description + subagent type
-   v
-Claude Code agent.spawn
-   |
-   v
-claude-kev-orchestrator Mod
-   |
-   +----> WorkPackage normalizer
-   |          |
-   |          v
-   |      Shared Session State
-   |
-   +----> Kev Client ----> Kev/Qwen
-   |                        |
-   |                        v
-   |                 model-fit decision
-   |                  haiku/sonnet/opus
-   |
-   v
-agent.spawn { model }
-   |
-   v
-Claude subagent
+IDLE
+  |
+  | [kev] prompt
+  v
+DECOMPOSE
+  |
+  | parent invokes Agent
+  v
+DELEGATE
+  |
+  | agent.spawn
+  v
+WORKERS_RUNNING
+  |
+  | Agent tool returns
+  v
+INTEGRATE
+  |
+  v
+VERIFY
 ```
 
-## 5. Work Package model
+v0.2 currently implements the path through `INTEGRATE`. Explicit verification-state transitions are a later step.
 
-The mod must not ask Kev to understand the entire repository. It sends the already-decomposed unit that Claude is about to delegate.
+## 4. Parent execution contract
+
+While orchestration is active:
+
+### DECOMPOSE / DELEGATE / WORKERS_RUNNING
+
+The main parent may:
+
+- inspect/read/search;
+- reason about architecture and contracts;
+- create work-package instructions;
+- invoke the Agent tool.
+
+The main parent may not directly use:
+
+- `Edit`
+- `Write`
+- `NotebookEdit`
+
+If it tries, the Mod denies the tool call and returns a reason instructing the parent to create closed work packages and delegate them.
+
+Subagents are not restricted by this parent rule because their tool calls have an `agentId`.
+
+### INTEGRATE
+
+After delegated Agent work returns successfully, direct parent edits are permitted for integration.
+
+This first rule is deliberately deterministic. Kev is not asked to decide something that the execution contract already knows.
+
+## 5. Architecture
+
+```text
+User [kev] task
+      |
+      v
+Parent Claude
+(architect/orchestrator)
+      |
+      | tries Edit/Write too early
+      +------------------------------+
+      |                              |
+      v                              v
+ tool.call                       Runtime State
+      |                              |
+      +---- DENY if phase requires delegation
+      |
+      | Agent tool
+      v
+ agent.spawn
+      |
+      v
+Kev / Qwen
+      |
+      | model-fit decision
+      v
+haiku | sonnet | opus | inherit
+      |
+      v
+Worker Claude
+      |
+      v
+Agent tool returns
+      |
+      v
+Parent enters INTEGRATE
+```
+
+## 6. Closed Work Package
+
+The important unit is not "one function". It is an independently verifiable semantic unit.
+
+A Haiku-suitable package should normally have:
+
+- explicit boundaries;
+- explicit acceptance criteria;
+- small/local required context;
+- already-decided interfaces and contracts;
+- no architectural decision;
+- an independently testable result.
+
+A single function can still require Sonnet/Opus if it spans transactions, authorization, cache consistency, compatibility, or other cross-cutting semantics.
+
+## 7. Work Package model
 
 ```ts
 type WorkPackage = {
@@ -91,7 +156,7 @@ type WorkPackage = {
 }
 ```
 
-Kev returns:
+Kev currently returns:
 
 ```ts
 type ModelDecision = {
@@ -102,45 +167,36 @@ type ModelDecision = {
 }
 ```
 
-`shouldSplit` is recorded in v0.1 but not acted on yet. In v0.2 it can trigger a prompt correction that asks the parent to split a package further.
+The broader target contract is:
 
-## 6. Model-fit policy
+```ts
+type ExecutionDecision = {
+  actor: "parent" | "worker"
+  action: "execute" | "delegate" | "split" | "integrate" | "verify"
+  model?: "haiku" | "sonnet" | "opus" | "inherit"
+  confidence: number
+  reason?: string
+}
+```
 
-The important distinction is not LOC or number of functions. A Haiku-suitable unit is a **closed work package**.
+The broader decision is not wired into every action yet. It is the target for ambiguous execution choices where a deterministic state rule is insufficient.
 
-### Haiku
+## 8. Kev responsibility
 
-Prefer when:
+Kev should not try to out-code Claude.
 
-- acceptance criteria are explicit;
-- implementation is local;
-- required context is small;
-- interfaces/contracts are already decided;
-- no architectural choice is required;
-- the output can be independently verified.
+Kev's useful responsibilities are:
 
-### Sonnet
+- model-fit classification;
+- whether a package is sufficiently closed;
+- whether further splitting is worthwhile;
+- whether a failed package should retry or escalate;
+- which exploration/work stream should receive resources;
+- later, whether the current execution should return to delegation or integration.
 
-Prefer when:
+Deterministic policy stays in the runtime state machine.
 
-- multiple files/modules must be coordinated;
-- local exploration is required;
-- there are implementation choices;
-- integration work is involved;
-- the package is not cleanly closed.
-
-### Opus
-
-Prefer when:
-
-- architecture or public contracts change;
-- requirements are ambiguous;
-- cross-cutting design decisions are required;
-- failures indicate the package was decomposed at the wrong abstraction level.
-
-## 7. Kev API contract
-
-v0.1 uses a small HTTP contract so Kev can be implemented independently with Qwen.
+## 9. Kev API contract
 
 Environment:
 
@@ -173,82 +229,120 @@ Response:
 {
   "model": "haiku",
   "confidence": 0.91,
-  "reason": "Closed local implementation with explicit output",
+  "reason": "Closed local implementation with explicit acceptance criteria",
   "shouldSplit": false
 }
 ```
 
-Malformed/timeout responses are ignored and Claude Code continues with its original model resolution.
+Kev failures are fail-open for model routing: malformed responses, timeouts, or unavailable endpoints fall back conservatively.
 
-## 8. Prompt mode
+Execution-contract enforcement is local and does not depend on Kev availability.
 
-Prefixing a user prompt with `[kev]` enables an experimental decomposition hint.
+## 10. Prompt mode
 
-The mod removes the marker and appends a small instruction telling the parent model to:
+Prefix a user prompt with `[kev]`.
 
-- separate architecture decisions from implementation;
-- create closed work packages where possible;
-- delegate packages independently;
-- avoid forcing a package to Haiku if it still needs design decisions.
+The marker is removed and the runtime adds an orchestration instruction telling the parent to:
 
-This is intentionally opt-in because prompt rewriting is more invasive than model selection.
+- act as architect/orchestrator first;
+- make architecture/contract decisions;
+- create closed work packages;
+- delegate implementation through Agent;
+- integrate and verify worker results.
 
-## 9. State
+Unlike prompt-only orchestration, the runtime also enforces the first delegation boundary through `tool.call`.
 
-v0.1 keeps state only in the mod process:
+A normal prompt without `[kev]` resets orchestration to `idle`.
+
+## 11. State
+
+Current per-session state:
 
 ```ts
 type SessionState = {
+  active: boolean
+  phase:
+    | "idle"
+    | "decompose"
+    | "delegate"
+    | "workers_running"
+    | "integrate"
+    | "verify"
+  delegatedPackages: number
   decisions: DecisionRecord[]
 }
 ```
 
-A later version can persist/shared-sync:
+Later shared state can add:
 
 - package graph;
-- ownership;
+- dependencies;
+- owners;
 - attempts;
 - test outcomes;
+- package split lineage;
 - escalation history;
-- cost and latency;
-- package split lineage.
+- cost/latency;
+- exploration hypotheses/evidence.
 
-That state is where Kev can evolve from a static classifier into a learned execution policy.
+This can become a coordination substrate for parallel agents rather than only a model router.
 
-## 10. Evaluation
+## 12. Known v0.2 limitations
 
-Compare at least:
+- Parent mutation through arbitrary `Bash` commands is not blocked yet.
+- The state machine only enforces the initial delegation boundary.
+- `verify` is modeled but not automatically entered.
+- `shouldSplit` is recorded but not yet used to send the parent back to decomposition.
+- State is local to one Claude Code process/session.
+- Kev still makes only the model-fit decision.
 
-- all-Sonnet baseline;
-- fixed heuristic routing;
-- Kev routing.
+These limits are intentional to keep the first experiment observable.
+
+## 13. Evaluation
+
+Compare:
+
+1. all-Sonnet baseline;
+2. fixed model routing;
+3. Kev model routing;
+4. Kev routing + execution-state enforcement.
 
 Measure:
 
 - wall-clock duration;
-- estimated model cost;
+- model/token cost;
+- percentage of implementation delegated;
+- percentage executed by Haiku;
 - first-pass test success;
-- retry count;
-- escalation count;
-- human correction count.
+- retry/escalation count;
+- parent execution-contract violations;
+- human corrections;
+- final quality.
 
-The primary research question is:
+Primary research questions:
 
-> Can we transform/decompose work into closed packages such that weaker models execute a large share of implementation without reducing final quality?
+> Can stronger models transform work into closed packages so weaker models execute a large share of implementation without reducing final quality?
 
-## 11. Roadmap
+and:
+
+> Can runtime enforcement prevent orchestration instructions from being forgotten without making Claude Code materially less flexible?
+
+## 14. Roadmap
 
 ### v0.1 — Model-fit routing
-Intercept agent.spawn and choose model.
+Intercept `agent.spawn` and choose the worker model.
 
-### v0.2 — Split feedback
-If Kev returns shouldSplit, inject a corrective instruction before delegation rather than escalating immediately.
+### v0.2 — Execution state machine
+Enforce parent architect/delegation behavior before implementation. **Current.**
 
-### v0.3 — Outcome-aware escalation
-Track test/tool outcomes; Haiku -> Sonnet -> Opus only when evidence warrants it.
+### v0.3 — Split feedback
+Use `shouldSplit` to return oversized packages to the parent for further decomposition.
 
-### v0.4 — Shared work graph
-Persist package graph and allow parallel agents to coordinate through shared state.
+### v0.4 — Outcome-aware escalation
+Use test/tool outcomes to retry, split, or escalate Haiku -> Sonnet -> Opus.
 
-### v0.5 — Adaptive policy
-Train/tune Kev using observed package features and outcomes instead of hand-authored thresholds.
+### v0.5 — Shared work graph
+Coordinate parallel workers through shared facts, ownership, dependencies, and checkpoint state.
+
+### v0.6 — Adaptive execution policy
+Let Kev learn actor/action/model decisions from package features and observed outcomes.
