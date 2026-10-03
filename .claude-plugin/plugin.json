@@ -1,7 +1,7 @@
 {
   "name": "claude-kev-orchestrator",
-  "version": "0.2.0",
-  "description": "Kev-powered adaptive execution orchestration for Claude Code. Enforces parent delegation and selects Haiku, Sonnet, Opus, or inherit for spawned work packages.",
+  "version": "0.3.0",
+  "description": "Kev-powered adaptive execution orchestration for Claude Code with runtime delegation enforcement, model routing, and evaluation reports.",
   "author": {
     "name": "saketoshi"
   }
