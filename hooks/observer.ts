@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto"
+
 import type {
   ModelAlias,
   RunObservation,
@@ -22,16 +24,46 @@ export function isTestCommand(command: string | undefined): boolean {
   return TEST_PATTERNS.some((pattern) => pattern.test(command))
 }
 
+function modelRank(model: ModelAlias): number {
+  if (model === "haiku") return 1
+  if (model === "sonnet") return 2
+  if (model === "opus") return 3
+  return 0
+}
+
+export function lineageIdFor(description: string): string {
+  const normalized = description.trim().toLowerCase().replace(/\s+/g, " ")
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16)
+}
+
 export function startWorkPackageOutcome(
   run: RunObservation | undefined,
   workPackageId: string,
+  description: string,
   model: ModelAlias,
   at = Date.now(),
-): void {
-  if (!run) return
+): { lineageId?: string; attempt?: number; escalatedFrom?: ModelAlias } {
+  if (!run) return {}
+
+  const lineageId = lineageIdFor(description)
+  const previousIds = run.lineageAttempts[lineageId] ?? []
+  const previous =
+    previousIds.length === 0
+      ? undefined
+      : run.workPackageOutcomes[previousIds[previousIds.length - 1]]
+  const attempt = previousIds.length + 1
+  const escalatedFrom =
+    previous !== undefined && modelRank(model) > modelRank(previous.model)
+      ? previous.model
+      : undefined
+
+  run.lineageAttempts[lineageId] = [...previousIds, workPackageId]
   run.workPackageOutcomes[workPackageId] = {
     workPackageId,
+    lineageId,
+    attempt,
     model,
+    escalatedFrom,
     startedAt: at,
     editCalls: 0,
     testRuns: 0,
@@ -41,6 +73,8 @@ export function startWorkPackageOutcome(
     finalOutcome: "unknown",
     evidence: [],
   }
+
+  return { lineageId, attempt, escalatedFrom }
 }
 
 export function bindAgent(
