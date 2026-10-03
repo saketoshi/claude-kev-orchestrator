@@ -11,6 +11,12 @@ import type {
 } from "./domain"
 import { askKev } from "./kev"
 import { fallbackDecision } from "./policy"
+import {
+  bindAgent,
+  completeWorkPackage,
+  observeWorkerTool,
+  startWorkPackageOutcome,
+} from "./observer"
 import { isKevPrompt, rewriteKevPrompt } from "./prompt"
 import {
   createRun,
@@ -163,6 +169,7 @@ export function register(on: On): void {
     }
 
     const before = state.delegatedPackages
+    const beforeDecisionCount = state.currentRun?.decisions.length ?? 0
     beginDelegation(state)
     syncRun(state.currentRun, state)
     runEvent(state, { type: "agent_tool_started", actor: "parent", tool: "Agent" })
@@ -172,6 +179,16 @@ export function register(on: On): void {
     const succeeded =
       result.deny === undefined && !result.isError && delegated
 
+    const delegatedRecords =
+      state.currentRun?.decisions.slice(beforeDecisionCount) ?? []
+    for (const record of delegatedRecords) {
+      completeWorkPackage(
+        state.currentRun,
+        record.workPackage.id,
+        succeeded,
+      )
+    }
+
     delegationFinished(state, succeeded)
     syncRun(state.currentRun, state)
     runEvent(state, {
@@ -179,6 +196,12 @@ export function register(on: On): void {
       actor: "parent",
       tool: "Agent",
       outcome: succeeded ? "succeeded" : "failed",
+      detail:
+        delegatedRecords.length > 0
+          ? `completed work packages: ${delegatedRecords
+              .map((record) => record.workPackage.id)
+              .join(", ")}`
+          : "no spawned work package observed",
     })
 
     $.ui.log(
@@ -213,6 +236,12 @@ export function register(on: On): void {
 
     state.decisions.push(record)
     recordDecision(state.currentRun, record)
+    startWorkPackageOutcome(
+      state.currentRun,
+      workPackage.id,
+      decision.model,
+      record.at,
+    )
     workerSpawned(state)
     syncRun(state.currentRun, state)
 
@@ -223,6 +252,7 @@ export function register(on: On): void {
 
     const agentId = result.agentId
     if (agentId !== undefined) record.agentId = agentId
+    bindAgent(state.currentRun, workPackage.id, agentId)
 
     runEvent(state, {
       type: "agent_spawned",
@@ -244,8 +274,55 @@ export function register(on: On): void {
     return result
   })
 
+
+  // Observe worker-side tools after execution and bind them back to the
+  // Work Package through agentId. This does not alter tool behavior.
+  on("tool.call", async ($, e, next) => {
+    const result = await next(e)
+
+    if (!state.active || e.agentId === undefined) {
+      return result
+    }
+
+    const command =
+      e.tool === "Bash" && "command" in e && typeof e.command === "string"
+        ? e.command
+        : undefined
+
+    const observed = observeWorkerTool(
+      state.currentRun,
+      e.agentId,
+      e.tool,
+      command,
+      result,
+    )
+
+    if (observed.workPackageId !== undefined) {
+      runEvent(state, {
+        type: observed.isTest
+          ? "worker_test_completed"
+          : "worker_tool_completed",
+        actor: "worker",
+        agentId: e.agentId,
+        workPackageId: observed.workPackageId,
+        tool: e.tool,
+        outcome: observed.succeeded ? "succeeded" : "failed",
+        detail:
+          observed.isTest && command !== undefined
+            ? command.slice(0, 300)
+            : undefined,
+      })
+    }
+
+    return result
+  })
+
   on("turn.complete", async ($, e, next) => {
-    if (state.active) await finalizeRun($, state)
+    const isWorkerTurn =
+      "agentId" in e &&
+      typeof (e as { agentId?: unknown }).agentId === "string"
+
+    if (state.active && !isWorkerTurn) await finalizeRun($, state)
     return next(e)
   })
 
