@@ -1,4 +1,4 @@
-# claude-kev-orchestrator Design v0.2
+# claude-kev-orchestrator Design v0.3
 
 ## 1. Goal
 
@@ -335,14 +335,79 @@ Intercept `agent.spawn` and choose the worker model.
 ### v0.2 — Execution state machine
 Enforce parent architect/delegation behavior before implementation. **Current.**
 
-### v0.3 — Split feedback
+### v0.3 — Observability and evaluation reports
+Persist run decisions, execution events, violations, and human feedback artifacts for measurable policy improvement. **Current.**
+
+### v0.4 — Split feedback
 Use `shouldSplit` to return oversized packages to the parent for further decomposition.
 
-### v0.4 — Outcome-aware escalation
+### v0.5 — Outcome-aware escalation
 Use test/tool outcomes to retry, split, or escalate Haiku -> Sonnet -> Opus.
 
-### v0.5 — Shared work graph
+### v0.6 — Shared work graph
 Coordinate parallel workers through shared facts, ownership, dependencies, and checkpoint state.
 
-### v0.6 — Adaptive execution policy
+### v0.7 — Adaptive execution policy
 Let Kev learn actor/action/model decisions from package features and observed outcomes.
+
+
+## 15. Observability and feedback artifacts
+
+Every orchestration turn is treated as one evaluation run.
+
+Default output:
+
+```text
+.kev/runs/<run-id>/
+  run.json
+  events.jsonl
+  decisions.jsonl
+  report.md
+  feedback.json
+```
+
+The output root can be overridden by `KEV_REPORT_DIR`.
+
+### Machine-readable data
+
+`run.json` contains the complete current run snapshot.
+
+`events.jsonl` records runtime observations such as:
+
+- run start/completion;
+- parent execution-contract violations;
+- Agent invocation;
+- subagent spawn;
+- Agent completion.
+
+`decisions.jsonl` records the prediction side:
+
+- Work Package;
+- selected model;
+- confidence;
+- reason;
+- `shouldSplit`;
+- Kev/fallback source;
+- spawned agent ID when available.
+
+### Human-readable report
+
+`report.md` summarizes:
+
+- model distribution;
+- routing decisions;
+- confidence;
+- violations;
+- failed Agent boundaries;
+- review questions.
+
+### Human feedback
+
+`feedback.json` is intentionally separate from generated observations so a reviewer can mark:
+
+- problematic Work Packages;
+- overall assessment;
+- free-form comments;
+- suggested policy changes.
+
+Future Kev training/evaluation should join prediction, runtime outcome, and human feedback by run/work-package identity rather than learning from model choice alone.
