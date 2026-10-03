@@ -23,7 +23,7 @@ When a prompt starts with `[kev]`:
 
 So this is intentionally more than a model router: it also protects the execution strategy from being forgotten by the parent model.
 
-See [docs/design-v0.2.md](docs/design-v0.2.md) for the detailed design.
+See [docs/design-v0.3.md](docs/design-v0.3.md) for the detailed design.
 
 ## Runtime flow
 
@@ -131,11 +131,22 @@ http://127.0.0.1:8787/decide
 
 Use this first to verify the Claude Code interception flow before connecting the real Kev implementation.
 
-### 4. Install dev dependencies and type-check
+### 4. Install development dependencies
 
 ```bash
 npm install
+```
+
+Claude Code Mod TypeScript imports its runtime declarations from the generated `claude-code` types. For local type-checking, generate/update plugin types with Claude Code's `/plugin-types` workflow for your installed version, then run:
+
+```bash
 npm run check
+```
+
+You can also use Claude Code's plugin test runner as tests are added:
+
+```bash
+claude plugin test .
 ```
 
 ### 5. Start Claude Code with the Plugin
@@ -296,7 +307,7 @@ hooks/kev.ts                 Kev HTTP client
 hooks/policy.ts              conservative fallback model policy
 hooks/prompt.ts              [kev] opt-in + parent execution contract
 examples/mock-kev-server.mjs mock decision service
-docs/design-v0.2.md          architecture and roadmap
+docs/design-v0.3.md          architecture and roadmap
 ```
 
 ## Current safety/flexibility boundary
