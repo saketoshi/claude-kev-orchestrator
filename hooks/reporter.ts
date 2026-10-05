@@ -1,12 +1,15 @@
-import { mkdir, writeFile } from "node:fs/promises"
-import path from "node:path"
-
 import type {
   DecisionRecord,
   RunEvent,
   RunObservation,
   SessionState,
 } from "./domain"
+
+export interface ReportArtifact {
+  name: string
+  content: string
+  preserveExisting?: boolean
+}
 
 function jsonl(values: readonly unknown[]): string {
   return values.map((value) => JSON.stringify(value)).join("\n") + (values.length ? "\n" : "")
@@ -154,52 +157,48 @@ export function syncRun(run: RunObservation | undefined, state: SessionState): v
   run.delegatedPackages = state.delegatedPackages
 }
 
-export async function writeRunReport(
+export function reportArtifacts(run: RunObservation): ReportArtifact[] {
+  const outcomes = Object.values(run.workPackageOutcomes)
+  return [
+    { name: "run.json", content: JSON.stringify(run, null, 2) + "\n" },
+    { name: "events.jsonl", content: jsonl(run.events) },
+    { name: "decisions.jsonl", content: jsonl(run.decisions) },
+    { name: "outcomes.jsonl", content: jsonl(outcomes) },
+    { name: "reviews.jsonl", content: jsonl(run.reviews) },
+    { name: "report.md", content: markdown(run) },
+    {
+      name: "feedback.json",
+      preserveExisting: true,
+      content:
+        JSON.stringify(
+          {
+            runId: run.id,
+            overall: null,
+            problematicWorkPackages: [],
+            comments: "",
+            suggestedPolicyChanges: [],
+          },
+          null,
+          2,
+        ) + "\n",
+    },
+  ]
+}
+
+export function joinPath(base: string, ...parts: string[]): string {
+  const normalizedBase = base.replace(/[\\/]+$/, "")
+  const normalizedParts = parts.map((part) => part.replace(/^[\\/]+|[\\/]+$/g, ""))
+  return [normalizedBase, ...normalizedParts].filter(Boolean).join("/")
+}
+
+export function reportDirectory(
   cwd: string,
   reportDir: string | undefined,
-  run: RunObservation,
-): Promise<string> {
-  const base = reportDir
-    ? path.resolve(cwd, reportDir)
-    : path.join(cwd, ".kev", "runs")
-  const dir = path.join(base, run.id)
-
-  await mkdir(dir, { recursive: true })
-
-  const outcomes = Object.values(run.workPackageOutcomes)
-
-  await Promise.all([
-    writeFile(path.join(dir, "run.json"), JSON.stringify(run, null, 2) + "\n", "utf8"),
-    writeFile(path.join(dir, "events.jsonl"), jsonl(run.events), "utf8"),
-    writeFile(path.join(dir, "decisions.jsonl"), jsonl(run.decisions), "utf8"),
-    writeFile(path.join(dir, "outcomes.jsonl"), jsonl(outcomes), "utf8"),
-    writeFile(path.join(dir, "reviews.jsonl"), jsonl(run.reviews), "utf8"),
-    writeFile(path.join(dir, "report.md"), markdown(run), "utf8"),
-  ])
-
-  // Never overwrite human feedback when the report is refreshed after a
-  // review or late runtime event.
-  await writeFile(
-    path.join(dir, "feedback.json"),
-    JSON.stringify(
-      {
-        runId: run.id,
-        overall: null,
-        problematicWorkPackages: [],
-        comments: "",
-        suggestedPolicyChanges: [],
-      },
-      null,
-      2,
-    ) + "\n",
-    { encoding: "utf8", flag: "wx" },
-  ).catch((error: unknown) => {
-    const code =
-      typeof error === "object" && error !== null && "code" in error
-        ? (error as { code?: unknown }).code
-        : undefined
-    if (code !== "EEXIST") throw error
-  })
-
-  return dir
+  runId: string,
+): string {
+  if (reportDir) {
+    const isAbsolute = /^[A-Za-z]:[\\/]/.test(reportDir) || reportDir.startsWith("/")
+    return joinPath(isAbsolute ? reportDir : joinPath(cwd, reportDir), runId)
+  }
+  return joinPath(cwd, ".kev", "runs", runId)
 }
