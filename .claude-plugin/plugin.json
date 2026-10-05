@@ -1,7 +1,7 @@
 {
-  "name": "claude-kev-orchestrator",
-  "version": "0.4.0",
-  "description": "Kev-powered adaptive execution orchestration for Claude Code with runtime delegation enforcement, model routing, live control pane, human override, optional Codex review, and evaluation reports.",
+  "name": "kev-orchestrator",
+  "version": "0.4.1",
+  "description": "Kev-powered adaptive execution orchestration for Claude Code with runtime delegation enforcement, Ribbon model routing, live control pane, human override, optional Codex review, and evaluation reports.",
   "author": {
     "name": "saketoshi"
   }
