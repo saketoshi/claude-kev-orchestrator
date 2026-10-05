@@ -1,3 +1,4 @@
 node_modules/
 .kev/
 .claude-plugin/types/
+eval/results/
