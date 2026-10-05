@@ -1,4 +1,4 @@
 {
-  "description": "Kev-powered model selection and optional decomposition guidance for Claude Code subagents.",
+  "description": "Kev-powered execution orchestration, Ribbon model selection, runtime enforcement, observability, human override and optional external review for Claude Code.",
   "modules": ["./register.ts"]
 }
