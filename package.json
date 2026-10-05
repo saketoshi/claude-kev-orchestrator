@@ -1,14 +1,15 @@
 {
-  "name": "claude-kev-orchestrator",
-  "version": "0.4.0",
+  "name": "kev-orchestrator",
+  "version": "0.4.1",
   "private": true,
   "description": "Kev-powered adaptive execution orchestration for Claude Code",
   "type": "module",
   "scripts": {
+    "validate": "claude plugin validate .",
+    "test": "claude plugin test .",
     "check": "tsc --noEmit"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   }
 }

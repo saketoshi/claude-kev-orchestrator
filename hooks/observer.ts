@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto"
-
 import type {
   ModelAlias,
   RunObservation,
@@ -31,9 +29,21 @@ function modelRank(model: ModelAlias): number {
   return 0
 }
 
+function fnv1a(value: string, seed: number): number {
+  let hash = seed >>> 0
+  const bytes = new TextEncoder().encode(value)
+  for (const byte of bytes) {
+    hash ^= byte
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash
+}
+
 export function lineageIdFor(description: string): string {
   const normalized = description.trim().toLowerCase().replace(/\s+/g, " ")
-  return createHash("sha256").update(normalized).digest("hex").slice(0, 16)
+  const high = fnv1a(normalized, 0x811c9dc5)
+  const low = fnv1a(normalized, 0x9e3779b9)
+  return high.toString(16).padStart(8, "0") + low.toString(16).padStart(8, "0")
 }
 
 export function startWorkPackageOutcome(
@@ -47,10 +57,8 @@ export function startWorkPackageOutcome(
 
   const lineageId = lineageIdFor(description)
   const previousIds = run.lineageAttempts[lineageId] ?? []
-  const previous =
-    previousIds.length === 0
-      ? undefined
-      : run.workPackageOutcomes[previousIds[previousIds.length - 1]]
+  const previousId = previousIds.length > 0 ? previousIds[previousIds.length - 1] : undefined
+  const previous = previousId ? run.workPackageOutcomes[previousId] : undefined
   const attempt = previousIds.length + 1
   const escalatedFrom =
     previous !== undefined && modelRank(model) > modelRank(previous.model)
@@ -123,9 +131,7 @@ export function observeWorkerTool(
     )
   } else if (!succeeded) {
     outcome.otherToolFailures += 1
-    outcome.evidence.push(
-      `${new Date(at).toISOString()} ${tool} failed`,
-    )
+    outcome.evidence.push(`${new Date(at).toISOString()} ${tool} failed`)
   }
 
   return {
