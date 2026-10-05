@@ -1,6 +1,4 @@
-import { randomUUID } from "node:crypto"
-
-import type { EngineInterface, On } from "claude-code"
+import type { EngineInterface, HttpResponse, On } from "claude-code"
 
 import type {
   DecisionRecord,
@@ -9,7 +7,18 @@ import type {
   SessionState,
   WorkPackage,
 } from "./domain"
-import { askKev } from "./kev"
+import {
+  DEFAULT_MIN_CONFIDENCE,
+  DEFAULT_RIBBON_BASE_URL,
+  DEFAULT_RIBBON_MODEL,
+  DEFAULT_TIMEOUT_MS,
+  applyConfidenceFloor,
+  endpointRequest,
+  normalizeDecision,
+  parseRibbonDecision,
+  ribbonRequest,
+  safeRibbonToken,
+} from "./kev"
 import {
   bindAgent,
   completeWorkPackage,
@@ -21,12 +30,20 @@ import { fallbackDecision } from "./policy"
 import { isKevPrompt, rewriteKevPrompt } from "./prompt"
 import {
   createRun,
+  joinPath,
   recordDecision,
   recordEvent,
+  reportArtifacts,
+  reportDirectory,
   syncRun,
-  writeRunReport,
 } from "./reporter"
-import { runCodexReview, shouldAutoReview } from "./reviewer"
+import {
+  codexReviewCommand,
+  codexReviewErrorRecord,
+  codexReviewRecord,
+  isEnabled,
+  parseCodexTimeout,
+} from "./reviewer"
 import {
   beginDelegation,
   delegationFinished,
@@ -37,12 +54,33 @@ import {
   workerSpawned,
 } from "./state-machine"
 
-const DEFAULT_TIMEOUT_MS = 1500
+type KevConfig =
+  | {
+      mode: "endpoint"
+      endpoint: string
+      timeoutMs: number
+      minConfidence: number
+    }
+  | {
+      mode: "ribbon"
+      baseUrl: string
+      apiKey?: string
+      model: string
+      timeoutMs: number
+      minConfidence: number
+    }
 
-function parseTimeout(raw: string | undefined): number {
-  if (!raw) return DEFAULT_TIMEOUT_MS
+type PaneRuntime = { isOpen: boolean }
+
+type FetchOutcome =
+  | { kind: "response"; response: HttpResponse }
+  | { kind: "timeout" }
+  | { kind: "error"; error: unknown }
+
+function parsePositiveNumber(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback
   const parsed = Number(raw)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TIMEOUT_MS
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
 }
 
 function packageFromSpawn(e: {
@@ -79,6 +117,178 @@ function runEvent(
   })
 }
 
+async function resolveKevConfig($: EngineInterface): Promise<KevConfig> {
+  const endpoint = await $.env.get("KEV_ENDPOINT")
+  const timeoutMs = parsePositiveNumber(
+    await $.env.get("KEV_TIMEOUT_MS"),
+    DEFAULT_TIMEOUT_MS,
+  )
+  const minConfidence = Math.max(
+    0,
+    Math.min(
+      1,
+      parsePositiveNumber(
+        await $.env.get("KEV_MIN_CONFIDENCE"),
+        DEFAULT_MIN_CONFIDENCE,
+      ),
+    ),
+  )
+
+  if (endpoint) {
+    return { mode: "endpoint", endpoint, timeoutMs, minConfidence }
+  }
+
+  const baseUrl =
+    (await $.env.get("KEV_BASE_URL")) ?? DEFAULT_RIBBON_BASE_URL
+  const explicitKey = await $.env.get("KEV_API_KEY")
+  const anthropicToken = await $.env.get("ANTHROPIC_AUTH_TOKEN")
+  const apiKey = safeRibbonToken(baseUrl, explicitKey, anthropicToken)
+  const model = (await $.env.get("KEV_MODEL")) ?? DEFAULT_RIBBON_MODEL
+
+  return {
+    mode: "ribbon",
+    baseUrl,
+    apiKey,
+    model,
+    timeoutMs,
+    minConfidence,
+  }
+}
+
+async function fetchWithTimeout(
+  $: EngineInterface,
+  url: string,
+  init: { method: "POST"; headers: Record<string, string>; body: string },
+  timeoutMs: number,
+): Promise<FetchOutcome> {
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = $.clock.after(timeoutMs, () => {
+      if (settled) return
+      settled = true
+      resolve({ kind: "timeout" })
+    })
+
+    const finish = (outcome: FetchOutcome): void => {
+      if (settled) return
+      settled = true
+      timer.cancel()
+      resolve(outcome)
+    }
+
+    $.http
+      .fetch(url, init)
+      .then((response) => finish({ kind: "response", response }))
+      .catch((error: unknown) => finish({ kind: "error", error }))
+  })
+}
+
+async function askKev(
+  $: EngineInterface,
+  config: KevConfig,
+  workPackage: WorkPackage,
+): Promise<ModelDecision | undefined> {
+  if (config.mode === "ribbon" && !config.apiKey) {
+    $.ui.log(
+      "kev: Ribbon routing unavailable: set KEV_API_KEY or use the default Ribbon URL with ANTHROPIC_AUTH_TOKEN",
+      { to: "debug" },
+    )
+    return undefined
+  }
+
+  const request =
+    config.mode === "endpoint"
+      ? endpointRequest(config.endpoint, workPackage)
+      : ribbonRequest(config.baseUrl, config.apiKey ?? "", config.model, workPackage)
+
+  const outcome = await fetchWithTimeout(
+    $,
+    request.url,
+    {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+    },
+    config.timeoutMs,
+  )
+
+  if (outcome.kind === "timeout") {
+    $.ui.log(`kev: routing timed out after ${config.timeoutMs}ms`, { to: "debug" })
+    return undefined
+  }
+  if (outcome.kind === "error") {
+    const message = outcome.error instanceof Error ? outcome.error.message : String(outcome.error)
+    $.ui.log(`kev: routing request failed: ${message}`, { to: "debug" })
+    return undefined
+  }
+
+  const { response } = outcome
+  if (!response.ok) {
+    const requestId = response.headers["x-typesafe-request-id"]
+    $.ui.log(
+      `kev: routing HTTP ${response.status}${requestId ? ` request-id=${requestId}` : ""}`,
+      { to: "debug" },
+    )
+    return undefined
+  }
+
+  let value: unknown
+  try {
+    value = JSON.parse(response.text)
+  } catch {
+    $.ui.log("kev: routing response was not valid JSON", { to: "debug" })
+    return undefined
+  }
+
+  const decision =
+    config.mode === "endpoint"
+      ? normalizeDecision(value)
+      : parseRibbonDecision(value)
+  if (!decision) {
+    $.ui.log("kev: routing response did not contain a valid decision", {
+      to: "debug",
+    })
+    return undefined
+  }
+
+  return applyConfidenceFloor(decision, config.minConfidence)
+}
+
+function invalidate($: EngineInterface): void {
+  $.ui.invalidate("ui.render")
+}
+
+async function openPane(
+  $: EngineInterface,
+  pane: PaneRuntime,
+): Promise<void> {
+  if (pane.isOpen) {
+    invalidate($)
+    return
+  }
+
+  try {
+    const opened = await $.ui.open({
+      id: PANE_ID,
+      title: PANE_TITLE,
+      holdToasts: true,
+    })
+    const isPlaced =
+      typeof opened !== "object" ||
+      opened === null ||
+      !("isPlaced" in opened) ||
+      (opened as { isPlaced?: unknown }).isPlaced !== false
+
+    pane.isOpen = isPlaced
+    if (isPlaced) invalidate($)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    $.ui.log(`kev: pane unavailable on this surface: ${message}`, {
+      to: "debug",
+    })
+  }
+}
+
 async function persistRun(
   $: EngineInterface,
   state: SessionState,
@@ -89,7 +299,14 @@ async function persistRun(
   syncRun(run, state)
   const cwd = await $.session.cwd()
   const reportDir = await $.env.get("KEV_REPORT_DIR")
-  return writeRunReport(cwd, reportDir, run)
+  const directory = reportDirectory(cwd, reportDir, run.id)
+
+  for (const artifact of reportArtifacts(run)) {
+    const path = joinPath(directory, artifact.name)
+    if (artifact.preserveExisting && (await $.fs.exists(path))) continue
+    await $.fs.write(path, artifact.content)
+  }
+  return directory
 }
 
 async function executeCodexReview(
@@ -97,17 +314,30 @@ async function executeCodexReview(
   state: SessionState,
   trigger: "manual" | "auto",
 ): Promise<string> {
-  if (!state.currentRun) {
-    return "No Kev run is available for review. Start a [kev] task first."
+  const run = state.currentRun
+  if (!run) return "No Kev run is available for review. Start a [kev] task first."
+
+  const cwd = await $.session.cwd()
+  const model = await $.env.get("KEV_CODEX_MODEL")
+  const timeoutMs = parseCodexTimeout(await $.env.get("KEV_CODEX_TIMEOUT_MS"))
+  const command = codexReviewCommand(model, timeoutMs)
+
+  try {
+    const result = await $.process.run(command.argv, {
+      cwd,
+      timeoutMs: command.timeoutMs,
+    })
+    run.reviews.push(codexReviewRecord(trigger, command, result))
+  } catch (error) {
+    run.reviews.push(codexReviewErrorRecord(trigger, command, error))
   }
 
-  const review = await runCodexReview($, state.currentRun, trigger)
+  const review = run.reviews[run.reviews.length - 1]
   const written = await persistRun($, state)
+  invalidate($)
 
-  $.ui.invalidate("ui.render")
-
-  if (!review.succeeded) {
-    const detail = review.error || review.output || "unknown error"
+  if (!review?.succeeded) {
+    const detail = review?.error || review?.output || "unknown error"
     $.ui.log(`kev: Codex review failed: ${detail}`, { to: "debug" })
     return `Codex review failed: ${detail}`
   }
@@ -116,7 +346,6 @@ async function executeCodexReview(
     `kev: Codex review completed${written ? `; report=${written}` : ""}`,
     { to: "debug" },
   )
-
   return review.output || "Codex review completed with no textual output."
 }
 
@@ -128,7 +357,7 @@ async function finalizeRun(
   if (!run || run.finishedAt !== undefined) return
 
   if (
-    (await shouldAutoReview($)) &&
+    isEnabled(await $.env.get("KEV_CODEX_AUTO_REVIEW")) &&
     !run.reviews.some((review) => review.trigger === "auto")
   ) {
     await executeCodexReview($, state, "auto")
@@ -148,8 +377,6 @@ async function finalizeRun(
     phase: state.phase,
     detail: written,
   })
-
-  // Rewrite once so report_written is also persisted.
   await persistRun($, state)
   $.ui.log(`kev: run report written to ${written}`, { to: "debug" })
 }
@@ -161,40 +388,7 @@ export function register(on: On): void {
     delegatedPackages: 0,
     decisions: [],
   }
-
-  let isPaneOpen = false
-
-  const invalidate = ($: EngineInterface): void => {
-    $.ui.invalidate("ui.render")
-  }
-
-  const openPane = async ($: EngineInterface): Promise<void> => {
-    if (isPaneOpen) {
-      invalidate($)
-      return
-    }
-
-    try {
-      const opened = await $.ui.open({
-        id: PANE_ID,
-        title: PANE_TITLE,
-        holdToasts: true,
-      })
-      const isPlaced =
-        typeof opened !== "object" ||
-        opened === null ||
-        !("isPlaced" in opened) ||
-        (opened as { isPlaced?: unknown }).isPlaced !== false
-
-      isPaneOpen = isPlaced
-      if (isPlaced) invalidate($)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      $.ui.log(`kev: pane unavailable on this surface: ${message}`, {
-        to: "debug",
-      })
-    }
-  }
+  const pane: PaneRuntime = { isOpen: false }
 
   on("session.start", async ($, e, next) => {
     state.decisions.length = 0
@@ -203,10 +397,7 @@ export function register(on: On): void {
     resetOrchestration(state)
 
     for (const command of [
-      {
-        name: "kev",
-        description: "Toggle the Kev Orchestrator pane",
-      },
+      { name: "kev", description: "Toggle the Kev Orchestrator pane" },
       {
         name: "kev-review",
         description: "Run an optional Codex review of uncommitted changes",
@@ -216,40 +407,38 @@ export function register(on: On): void {
         await $.command.register(command)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        $.ui.log(
-          `kev: /${command.name} registration skipped: ${message}`,
-          { to: "debug" },
-        )
+        $.ui.log(`kev: /${command.name} registration skipped: ${message}`, {
+          to: "debug",
+        })
       }
     }
 
-    $.ui.log("claude-kev-orchestrator: active", { to: "debug" })
+    $.ui.log("kev-orchestrator: active", { to: "debug" })
     return next(e)
   })
 
   on("command.run", { command: "kev" }, async ($) => {
-    if (isPaneOpen) {
+    if (pane.isOpen) {
       await $.ui.close({ id: PANE_ID }).catch(() => undefined)
-      isPaneOpen = false
+      pane.isOpen = false
       return { text: "Kev Orchestrator pane hidden." }
     }
 
-    await openPane($)
+    await openPane($, pane)
     return {
-      text: isPaneOpen
+      text: pane.isOpen
         ? "Kev Orchestrator pane shown."
         : "Kev Orchestrator pane is unavailable on this surface.",
     }
   })
 
-  on("command.run", { command: "kev-review" }, async ($) => {
-    const text = await executeCodexReview($, state, "manual")
-    return { text }
-  })
+  on("command.run", { command: "kev-review" }, async ($) => ({
+    text: await executeCodexReview($, state, "manual"),
+  }))
 
   on("ui.close", { id: PANE_ID }, async ($, e, next) => {
     const result = await next(e)
-    if (result.deny === undefined) isPaneOpen = false
+    if (result.deny === undefined) pane.isOpen = false
     return result
   })
 
@@ -258,17 +447,15 @@ export function register(on: On): void {
 
     try {
       const { Box, Text, Button } = await $.ui.resolve(e)
-
       return paneView(
         { Box, Text, Button },
         state,
         {
           setNextModel: (model) => {
             state.nextModelOverride = model
-            $.ui.log(
-              `kev: next worker override=${model ?? "auto"}`,
-              { to: "debug" },
-            )
+            $.ui.log(`kev: next worker override=${model ?? "auto"}`, {
+              to: "debug",
+            })
             invalidate($)
           },
           runCodexReview: () => {
@@ -295,48 +482,41 @@ export function register(on: On): void {
     startOrchestration(state)
     state.decisions.length = 0
     state.nextModelOverride = undefined
-    state.currentRun = createRun(randomUUID(), e.text)
+    state.currentRun = createRun(crypto.randomUUID(), e.text)
     runEvent(state, { type: "run_started" })
 
     const rewritten = rewriteKevPrompt(e.text)
-
     $.ui.log(
       `kev: orchestration enabled; run=${state.currentRun.id}; parent starts in decompose phase`,
       { to: "debug" },
     )
 
-    void openPane($)
+    void openPane($, pane)
     invalidate($)
-
     return rewritten === undefined ? next(e) : next({ ...e, text: rewritten })
   })
 
-  for (const tool of ["Edit", "Write", "NotebookEdit"]) {
-    on("tool.call", { tool }, ($, e, next) => {
-      if (shouldDenyParentEdit(state, e.tool, e.agentId)) {
-        const deny = parentEditDenyReason(state)
-        runEvent(state, {
-          type: "parent_edit_denied",
-          actor: "parent",
-          tool: e.tool,
-          outcome: "denied",
-          detail: deny,
-        })
-        $.ui.log(`kev: denied parent ${e.tool} during ${state.phase}`, {
-          to: "debug",
-        })
-        invalidate($)
-        return { deny }
-      }
-
-      return next(e)
-    })
-  }
+  on("tool.call", { tool: /^(Edit|Write|NotebookEdit)$/ }, ($, e, next) => {
+    if (shouldDenyParentEdit(state, e.tool, e.agentId)) {
+      const deny = parentEditDenyReason(state)
+      runEvent(state, {
+        type: "parent_edit_denied",
+        actor: "parent",
+        tool: e.tool,
+        outcome: "denied",
+        detail: deny,
+      })
+      $.ui.log(`kev: denied parent ${e.tool} during ${state.phase}`, {
+        to: "debug",
+      })
+      invalidate($)
+      return { deny }
+    }
+    return next(e)
+  })
 
   on("tool.call", { tool: "Agent" }, async ($, e, next) => {
-    if (!state.active || e.agentId !== undefined) {
-      return next(e)
-    }
+    if (!state.active || e.agentId !== undefined) return next(e)
 
     const before = state.delegatedPackages
     const beforeDecisionCount = state.currentRun?.decisions.length ?? 0
@@ -351,18 +531,11 @@ export function register(on: On): void {
 
     const result = await next(e)
     const delegated = state.delegatedPackages > before
-    const succeeded =
-      result.deny === undefined && !result.isError && delegated
-
-    const delegatedRecords =
-      state.currentRun?.decisions.slice(beforeDecisionCount) ?? []
+    const succeeded = result.deny === undefined && !result.isError && delegated
+    const delegatedRecords = state.currentRun?.decisions.slice(beforeDecisionCount) ?? []
 
     for (const record of delegatedRecords) {
-      completeWorkPackage(
-        state.currentRun,
-        record.workPackage.id,
-        succeeded,
-      )
+      completeWorkPackage(state.currentRun, record.workPackage.id, succeeded)
     }
 
     delegationFinished(state, succeeded)
@@ -374,39 +547,26 @@ export function register(on: On): void {
       outcome: succeeded ? "succeeded" : "failed",
       detail:
         delegatedRecords.length > 0
-          ? `completed work packages: ${delegatedRecords
-              .map((record) => record.workPackage.id)
-              .join(", ")}`
+          ? `completed work packages: ${delegatedRecords.map((record) => record.workPackage.id).join(", ")}`
           : "no spawned work package observed",
     })
-
-    $.ui.log(
-      `kev: Agent tool completed; phase=${state.phase}, delegated=${state.delegatedPackages}`,
-      { to: "debug" },
-    )
     invalidate($)
-
     return result
   })
 
   on("agent.spawn", async ($, e, next) => {
     const workPackage = packageFromSpawn(e)
-    const endpoint = await $.env.get("KEV_ENDPOINT")
-    const timeoutMs = parseTimeout(await $.env.get("KEV_TIMEOUT_MS"))
+    const config = await resolveKevConfig($)
 
-    let recommended: ModelDecision | undefined
-    let recommendationSource: "kev" | "fallback" = "fallback"
-
-    if (endpoint) {
-      recommended = await askKev(endpoint, timeoutMs, workPackage)
-      if (recommended) recommendationSource = "kev"
+    let recommended = await askKev($, config, workPackage)
+    let recommendationSource: "kev" | "fallback" = "kev"
+    if (!recommended) {
+      recommended = fallbackDecision(workPackage)
+      recommendationSource = "fallback"
     }
-
-    recommended ??= fallbackDecision(workPackage)
 
     let decision = recommended
     let source: DecisionRecord["source"] = recommendationSource
-
     const humanOverride = state.nextModelOverride
     if (humanOverride !== undefined) {
       decision = {
@@ -422,14 +582,12 @@ export function register(on: On): void {
       at: Date.now(),
       workPackage,
       decision,
-      recommendedDecision:
-        source === "human_override" ? recommended : undefined,
+      recommendedDecision: source === "human_override" ? recommended : undefined,
       source,
     }
 
     state.decisions.push(record)
     recordDecision(state.currentRun, record)
-
     const lineage = startWorkPackageOutcome(
       state.currentRun,
       workPackage.id,
@@ -440,7 +598,6 @@ export function register(on: On): void {
     record.lineageId = lineage.lineageId
     record.attempt = lineage.attempt
     record.escalatedFrom = lineage.escalatedFrom
-
     workerSpawned(state)
     syncRun(state.currentRun, state)
     invalidate($)
@@ -453,7 +610,6 @@ export function register(on: On): void {
     const agentId = result.agentId
     if (agentId !== undefined) record.agentId = agentId
     bindAgent(state.currentRun, workPackage.id, agentId)
-
     runEvent(state, {
       type: "agent_spawned",
       actor: "worker",
@@ -465,33 +621,22 @@ export function register(on: On): void {
           ? `recommended=${recommended.model}; selected=${decision.model}`
           : decision.reason,
     })
-
-    const reason = decision.reason ? ` - ${decision.reason}` : ""
     $.ui.log(
-      `kev: ${workPackage.description} -> ${decision.model} (${Math.round(
-        decision.confidence * 100,
-      )}%) [${source}]${reason}`,
+      `kev: ${workPackage.description} -> ${decision.model} (${Math.round(decision.confidence * 100)}%) [${source}]${decision.reason ? ` - ${decision.reason}` : ""}`,
       { to: "debug" },
     )
     invalidate($)
-
     return result
   })
 
-  // Observe worker-side tools after execution and bind them back to the
-  // Work Package through agentId. This does not alter tool behavior.
   on("tool.call", async ($, e, next) => {
     const result = await next(e)
-
-    if (!state.active || e.agentId === undefined) {
-      return result
-    }
+    if (!state.active || e.agentId === undefined) return result
 
     const command =
       e.tool === "Bash" && "command" in e && typeof e.command === "string"
         ? e.command
         : undefined
-
     const observed = observeWorkerTool(
       state.currentRun,
       e.agentId,
@@ -502,30 +647,22 @@ export function register(on: On): void {
 
     if (observed.workPackageId !== undefined) {
       runEvent(state, {
-        type: observed.isTest
-          ? "worker_test_completed"
-          : "worker_tool_completed",
+        type: observed.isTest ? "worker_test_completed" : "worker_tool_completed",
         actor: "worker",
         agentId: e.agentId,
         workPackageId: observed.workPackageId,
         tool: e.tool,
         outcome: observed.succeeded ? "succeeded" : "failed",
-        detail:
-          observed.isTest && command !== undefined
-            ? command.slice(0, 300)
-            : undefined,
+        detail: observed.isTest && command !== undefined ? command.slice(0, 300) : undefined,
       })
       invalidate($)
     }
-
     return result
   })
 
   on("turn.complete", async ($, e, next) => {
     const isWorkerTurn =
-      "agentId" in e &&
-      typeof (e as { agentId?: unknown }).agentId === "string"
-
+      "agentId" in e && typeof (e as { agentId?: unknown }).agentId === "string"
     if (state.active && !isWorkerTurn) await finalizeRun($, state)
     invalidate($)
     return next(e)
